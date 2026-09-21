@@ -266,16 +266,21 @@ async function handleSave() {
       throw new Error('当前状态不允许更新进度')
     }
 
+    let expectedUpdatedAt = current.updated_at
     if (title && title !== current.title) {
-      await tasksApi.update(editForm.value.id, { title })
+      const updated = await tasksApi.update(editForm.value.id, { title })
+      expectedUpdatedAt = updated.data.updated_at
     }
     if (editForm.value.status !== current.status) {
-      await tasksApi.updateStatus(editForm.value.id, { status: editForm.value.status })
+      const updated = await tasksApi.updateStatus(editForm.value.id, { status: editForm.value.status })
+      expectedUpdatedAt = updated.data.updated_at
     }
     if (stage !== current.stage) {
       await tasksApi.updateProgress(editForm.value.id, {
         stage,
         content: editForm.value.note.trim() || undefined,
+        base_stage: current.stage,
+        expected_updated_at: expectedUpdatedAt,
       })
     }
 
@@ -290,7 +295,19 @@ async function handleSave() {
         variant: 'default',
       })
     }
-  } catch {
+  } catch (error) {
+    const detail = (error as { detail?: string; message?: string })?.detail
+      || (error as { message?: string })?.message
+    if (detail === '进度已被其他人更新') {
+      await loadTasks()
+      editOpen.value = false
+      showToast({
+        title: '进度已被其他人更新',
+        description: '已重新加载服务端最新阶段和计划，请确认后再次提交。',
+        variant: 'error',
+      })
+      return
+    }
     showToast({
       title: '保存失败',
       description: '请确认当前账号仍具备任务管理权限。',

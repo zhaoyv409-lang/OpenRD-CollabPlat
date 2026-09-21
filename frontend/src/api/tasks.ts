@@ -19,7 +19,19 @@ export interface Task {
   resource_links: { label: string; url: string }[]
   file_ids: string[]
   created_at: string
-  updated_at: string
+  updated_at: string | null
+}
+
+export interface TaskProgress {
+  id: string
+  task_id: string
+  user_id: string
+  user_name?: string | null
+  stage?: string | null
+  content?: string | null
+  next_plan?: string | null
+  file_ids?: string[] | null
+  created_at?: string | null
 }
 
 export interface TaskMember {
@@ -105,8 +117,13 @@ export const tasksApi = {
     file_ids?: string[]
     next_plan?: string
     base_stage?: string
+    expected_updated_at: string | null
   }) {
-    return api.post(`/tasks/${taskId}/progress`, data)
+    return api.post<TaskProgress>(`/tasks/${taskId}/progress`, data)
+  },
+
+  getProgressHistory(taskId: string, params?: { page?: number; page_size?: number }) {
+    return api.get<PaginatedData<TaskProgress>>(`/tasks/${taskId}/progress`, params)
   },
 
   updateResources(taskId: string, data: { resource_links: { label: string; url: string }[] }) {

@@ -79,7 +79,20 @@ test('B12 task management uses backend limits and dedicated mutation endpoints',
   assert.match(viewSource, /tasksApi\.update\([\s\S]*\{\s*title\s*\}/)
   assert.doesNotMatch(viewSource, /status:\s*'reviewing'/)
   assert.doesNotMatch(viewSource, /value:\s*'formed'/)
-  assert.match(apiSource, /updateProgress[\s\S]*content\?: string/)
+  assert.match(apiSource, /updateProgress[\s\S]*expected_updated_at:\s*string \| null/)
+  assert.match(viewSource, /expected_updated_at:\s*expectedUpdatedAt/)
+})
+
+test('B11 stage progress uses server history and optimistic concurrency tokens', () => {
+  const apiSource = readFileSync(new URL('../src/api/tasks.ts', import.meta.url), 'utf8')
+  const taskDetailSource = readFileSync(new URL('../src/views/TaskDetailView.vue', import.meta.url), 'utf8')
+  const teamDetailSource = readFileSync(new URL('../src/views/TeamDetailView.vue', import.meta.url), 'utf8')
+
+  assert.match(apiSource, /getProgressHistory[\s\S]*\/progress/)
+  assert.match(apiSource, /stage:\s*string[\s\S]*next_plan\?: string/)
+  assert.match(taskDetailSource, /tasksApi\.getProgressHistory\(/)
+  assert.match(taskDetailSource, /tasksApi\.updateProgress\([\s\S]*expected_updated_at:/)
+  assert.match(teamDetailSource, /tasksApi\.getProgressHistory\(/)
 })
 
 test('B12 my tasks expose explicit loading errors and null-safe fields', () => {

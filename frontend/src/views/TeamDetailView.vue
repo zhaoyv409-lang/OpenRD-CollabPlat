@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { tasksApi } from '@/api/tasks'
 import { usersApi } from '@/api/users'
 import type { UserSearchItem } from '@/api/users'
-import type { Assignment, JoinApplication, Task, TaskMember, TeamTimeline } from '@/api/tasks'
+import type { Assignment, JoinApplication, Task, TaskMember, TaskProgress } from '@/api/tasks'
 import { useAuthStore } from '@/stores/auth'
 import OrdAvatar from '@/components/ui/avatar/OrdAvatar.vue'
 import OrdBadge from '@/components/ui/badge/OrdBadge.vue'
@@ -30,7 +30,9 @@ const task = ref<Task | null>(null)
 const members = ref<TaskMember[]>([])
 const applications = ref<JoinApplication[]>([])
 const assignments = ref<Assignment[]>([])
-const timeline = ref<TeamTimeline[]>([])
+const progressHistory = ref<TaskProgress[]>([])
+const historyLoading = ref(false)
+const historyError = ref('')
 const leaderId = ref('')
 const stage = ref('')
 const viewMode = ref<ViewMode>('readonly')
@@ -126,21 +128,20 @@ const assignmentCopy: Record<string, Partial<Assignment>> = {
   'asgn-006': { title: '需求者验收', owner: '陈北', deliverable: '验收反馈记录' },
 }
 
-const timelineCopy: Record<string, Partial<TeamTimeline>> = {
-  'tl-001': { title: '任务创建完成', description: '已拆分为标签体系设计、现有条目重标注、搜索权重调优三个阶段。' },
-  'tl-002': { title: '收到加入申请', description: '5 位成员提交加入申请，等待队长审核。' },
-  'tl-003': { title: '标签体系评审排期', description: '计划确认标签分类边界与样例要求。' },
-  'tl-004': { title: '队伍招募完成', description: '后端、设计、运营协调角色已确认。' },
-  'tl-005': { title: '进入接口联调', description: '后端开始补充联调说明。' },
-  'tl-006': { title: '收到补充申请', description: '3 位成员申请加入测试、后端队列和医学文案协作。' },
-  'tl-007': { title: '准备验收', description: '完成联调后进入需求者验收。' },
-}
-
 const currentTask = computed(() => ({ ...task.value, ...taskCopy[task.value?.id || ''] }))
 const normalizedMembers = computed(() => members.value.map((item) => ({ ...item, ...memberCopy[item.id] })))
 const normalizedApplications = computed(() => applications.value.map((item) => ({ ...item, ...applicationCopy[item.id] })))
 const normalizedAssignments = computed(() => assignments.value.map((item) => ({ ...item, ...assignmentCopy[item.id] })))
-const normalizedTimeline = computed(() => timeline.value.map((item) => ({ ...item, ...timelineCopy[item.id] })))
+const normalizedTimeline = computed(() => progressHistory.value.map((item, index) => ({
+  id: item.id,
+  title: `${taskStageLabel(item.stage || undefined)} · ${item.user_name || item.user_id}`,
+  description: [
+    item.content || '未填写更新说明',
+    item.next_plan ? `下一步：${item.next_plan}` : '',
+  ].filter(Boolean).join('\n'),
+  date: item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '',
+  state: index === 0 ? 'doing' : 'done',
+})))
 
 const isLeader = computed(() => auth.user?.id === leaderId.value || auth.userRole === 'super_admin')
 const isMember = computed(() => isLeader.value || normalizedMembers.value.some((item) => item.user_id === auth.user?.id))
@@ -154,12 +155,6 @@ const statusText = computed(() => {
   if (viewMode.value === 'member') return '成员协作视角'
   return '只读浏览'
 })
-
-function setViewMode(mode: ViewMode) {
-  if (mode === 'leader' && !isLeader.value) return
-  if (mode === 'member' && !isMember.value) return
-  viewMode.value = mode
-}
 
 function determineViewMode() {
   if (isLeader.value) viewMode.value = 'leader'
@@ -181,7 +176,7 @@ async function loadData() {
     ])
 
     task.value = taskRes.data
-    members.value = (teamRes.data.members || []).map((m: any) => ({
+    members.value = (teamRes.data.members || []).map((m: TaskMember & { platform_id?: string }) => ({
       ...m,
       name: m.name || '',
       platform: m.platform_id || m.platform || '',
@@ -190,12 +185,27 @@ async function loadData() {
     stage.value = taskRes.data.team_status === 'collaborating' ? '接口联调' : '成员确认'
     applications.value = teamRes.data.applications || []
     assignments.value = teamRes.data.assignments || []
-    timeline.value = []
     determineViewMode()
+    await loadProgressHistory()
   } catch {
     task.value = null
   } finally {
     loading.value = false
+  }
+}
+
+async function loadProgressHistory() {
+  if (!taskId.value) return
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const res = await tasksApi.getProgressHistory(taskId.value, { page: 1, page_size: 100 })
+    progressHistory.value = res.data.items || []
+  } catch {
+    progressHistory.value = []
+    historyError.value = '阶段历史加载失败，请稍后重试。'
+  } finally {
+    historyLoading.value = false
   }
 }
 
@@ -435,6 +445,12 @@ onMounted(loadData)
               <OrdBadge variant="gray">Timeline</OrdBadge>
             </header>
             <div class="panel-body timeline-list">
+              <div v-if="historyLoading" class="timeline-state">阶段历史加载中...</div>
+              <div v-else-if="historyError" class="timeline-state timeline-state--error">
+                <span>{{ historyError }}</span>
+                <OrdButton variant="ghost" size="sm" @click="loadProgressHistory">重试</OrdButton>
+              </div>
+              <div v-else-if="!normalizedTimeline.length" class="timeline-state">暂无阶段更新记录</div>
               <article v-for="item in normalizedTimeline" :key="item.id" class="timeline-item" :class="`is-${item.state}`">
                 <span class="timeline-dot" />
                 <div>
@@ -725,6 +741,20 @@ onMounted(loadData)
 .timeline-list {
   display: grid;
   gap: 10px;
+}
+
+.timeline-state {
+  min-height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--ord-color-gray-500);
+  text-align: center;
+}
+
+.timeline-state--error {
+  color: var(--ord-color-red);
 }
 
 .member-item,

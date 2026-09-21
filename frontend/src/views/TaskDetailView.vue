@@ -58,6 +58,7 @@ interface TaskDetail {
   files: string[]
   resources: ResourceLink[]
   actions: string[]
+  updatedAt: string | null
 }
 
 interface TaskMemberDisplay {
@@ -84,6 +85,8 @@ const saving = ref(false)
 //新增响应式状态
 const showProgressModal = ref(false)
 const progressSaving = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
 // 阶段顺序与 OrdStageDots 默认阶段一致；每个阶段的 value 对应后端 TaskStage 枚举值
 const STAGES: { value: string; label: string }[] = [
   { value: 'team', label: '组队' },
@@ -230,14 +233,15 @@ async function handleStatusChange() {
     const d = res.data
     task.value.status = statusLabelMap[d.status] || d.status
     task.value.teamStatus = teamStatusLabelMap[d.team_status] || d.team_status || '招募中'
+    task.value.updatedAt = d.updated_at
     showStatusModal.value = false
     showToast({
       title: '任务状态已更新',
       description: `当前状态：${target}`,
       variant: 'success',
     })
-  } catch (err: any) {
-    const detail = err?.detail || err?.response?.data?.detail || '状态更新失败，请稍后重试。'
+  } catch (err: unknown) {
+    const detail = (err as { detail?: string })?.detail || '状态更新失败，请稍后重试。'
     showToast({ title: '状态更新失败', description: detail, variant: 'error' })
   } finally {
     statusSaving.value = false
@@ -246,17 +250,15 @@ async function handleStatusChange() {
 
 // 将任务状态映射为阶段索引，驱动 OrdStageDots 的颜色渲染：
 // 组队(0) -> 开发(1) -> 内测(2) -> 开源(3)；已完成/已关闭视为全部完成。
-const STAGE_BY_STATUS: Record<string, number> = {
-  '招募中': 0,
-  '解决中': 1,
-  '待验收': 2,
-  '已完成': 4,
-  '已关闭': 4,
-  '待处理': 0,
+const STAGE_INDEX: Record<string, number> = {
+  team: 0,
+  develop: 1,
+  beta: 2,
+  opensource: 3,
 }
 const currentStageIndex = computed(() => {
   if (!task.value) return 0
-  return STAGE_BY_STATUS[task.value.status] ?? 0
+  return STAGE_INDEX[task.value.stage] ?? 0
 })
 
 
@@ -267,12 +269,6 @@ const currentRoleLabel = computed(() => {
   if (hasPendingApplication.value) return '申请审核中'
   if (auth.userRole === 'requester') return '需求者'
   return '只读'
-})
-
-const currentActionLabel = computed(() => {
-  if (!task.value) return ''
-  if (canEdit.value) return task.value.action
-  return '仅查看任务进展'
 })
 
 const statusLabelMap: Record<string, string> = {
@@ -356,30 +352,24 @@ async function handleProgressSubmit() {
       next_plan: progressForm.value.next_plan.trim() || undefined,
       file_ids: fileIds.length ? fileIds : undefined,
       base_stage: progressForm.value.base_stage,
+      expected_updated_at: task.value.updatedAt,
     })
-    task.value.stage = stage
-    // 提交成功后立即刷新进度时间线，使面板主体内容即时同步本次提交
-    try {
-      const tlRes = await tasksApi.getTimeline(taskId.value)
-      if (task.value) {
-        task.value.milestones = (tlRes.data.timeline as MilestoneItem[]) || []
-      }
-    } catch {
-      // 时间线刷新失败不阻断主流程，下次进入页面仍会拉取
-    }
     showProgressModal.value = false
+    await loadTaskDetail()
     showToast({
       title: '进度已更新',
       description: `当前阶段：${stagename}`,
       variant: 'success',
     })
-  } catch (err: any) {
-    const statusCode = err?.response?.status
-    const detail = err?.response?.data?.detail || '提交失败，请稍后重试。'
-    if (statusCode === 409) {
+  } catch (err: unknown) {
+    const detail = (err as { detail?: string; message?: string })?.detail
+      || (err as { message?: string })?.message
+      || '提交失败，请稍后重试。'
+    if (detail === '进度已被其他人更新') {
+      await loadTaskDetail()
       showToast({
         title: '进度已被更新',
-        description: '进度已被其他成员更新，请刷新页面后重新提交。',
+        description: '已加载服务端最新阶段和计划，请确认后重新提交。',
         variant: 'error',
       })
     } else {
@@ -488,10 +478,9 @@ function removeAction(idx: number) {
 async function loadTaskDetail() {
   try {
     loading.value = true
-    const [detailRes, teamRes, tlRes] = await Promise.all([
+    const [detailRes, teamRes] = await Promise.all([
       tasksApi.getDetail(taskId.value),
       tasksApi.getTeam(taskId.value),
-      tasksApi.getTimeline(taskId.value).catch(() => null),
     ])
     const d = detailRes.data
     const teamData = teamRes.data
@@ -504,7 +493,6 @@ async function loadTaskDetail() {
     hasPendingApplication.value = (teamData.applications || []).some(
       (application) => application.user_id === auth.user?.id && application.status === 'pending',
     )
-    const timeline = (tlRes?.data?.timeline as MilestoneItem[]) || []
 
     task.value = {
       id: d.id,
@@ -531,13 +519,16 @@ async function loadTaskDetail() {
       isCurrentUserMember: members.some((member) => member.isMe),
       ownerId: d.owner_id || '',
       leaderId: d.leader_id || '',
-      milestones: timeline,
+      milestones: [],
       files: (d.file_ids || []).map((f: string) => f),
       resources: d.resource_links || [],
       actions: (() => {
         try { return JSON.parse(localStorage.getItem(`openrd_task_actions_${d.id}`) || '[]') } catch { return [] }
       })(),
+      updatedAt: d.updated_at,
     }
+
+    await loadProgressHistory()
 
     if (auth.userRole === 'super_admin') {
       viewMode.value = 'leader'
@@ -552,6 +543,29 @@ async function loadTaskDetail() {
     task.value = null
   } finally {
     loading.value = false
+  }
+}
+
+async function loadProgressHistory() {
+  if (!task.value) return
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const res = await tasksApi.getProgressHistory(taskId.value, { page: 1, page_size: 100 })
+    task.value.milestones = (res.data.items || []).map((item, index) => ({
+      title: `${STAGES.find((stage) => stage.value === item.stage)?.label || item.stage || '进度更新'} · ${item.user_name || item.user_id}`,
+      description: [
+        item.content || '未填写更新说明',
+        item.next_plan ? `下一步：${item.next_plan}` : '',
+      ].filter(Boolean).join('\n'),
+      date: item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '',
+      state: index === 0 ? 'doing' : 'done',
+    }))
+  } catch {
+    task.value.milestones = []
+    historyError.value = '进度历史加载失败，请稍后重试。'
+  } finally {
+    historyLoading.value = false
   }
 }
 
@@ -757,7 +771,13 @@ onMounted(() => {
           <div class="panel-body">
             <OrdStageDots :current="currentStageIndex" class="stage-dots" />
             <p class="section-copy">{{ task.brief }}</p>
-            <div class="timeline-scroll">
+            <div v-if="historyLoading" class="history-state">进度历史加载中...</div>
+            <div v-else-if="historyError" class="history-state history-state--error">
+              <span>{{ historyError }}</span>
+              <OrdButton variant="ghost" size="sm" @click="loadProgressHistory">重试</OrdButton>
+            </div>
+            <div v-else-if="!timelineItems.length" class="history-state">暂无阶段更新记录</div>
+            <div v-else class="timeline-scroll">
               <OrdTimeline :items="timelineItems" />
             </div>
           </div>
@@ -964,6 +984,20 @@ onMounted(() => {
   padding: 96px 32px 32px;
   display: grid;
   gap: 26px;
+}
+
+.history-state {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--ord-color-gray-500);
+  text-align: center;
+}
+
+.history-state--error {
+  color: var(--ord-color-red);
 }
 
 .loading-card,

@@ -4,6 +4,7 @@ import type { MockTask } from '../data/tasks'
 import { joinApplications, assignments, teamTimelines } from '../data/teams'
 import type { MockJoinApplication } from '../data/teams'
 import { users, currentUserId } from '../data/users'
+import { demands } from '../data/demands'
 import {
   successResponse,
   errorResponse,
@@ -14,6 +15,55 @@ import {
 
 const STORAGE_KEY_APPS = 'openrd_team_applications'
 const STORAGE_KEY_ASSIGNMENTS = 'openrd_team_assignments'
+const STORAGE_KEY_PROGRESS = 'openrd_task_progress'
+
+interface MockTaskProgress {
+  id: string
+  task_id: string
+  user_id: string
+  user_name: string
+  stage: string
+  content: string | null
+  next_plan: string | null
+  file_ids: string[]
+  created_at: string
+}
+
+const defaultProgressHistory: MockTaskProgress[] = [
+  {
+    id: 'progress-1042-1',
+    task_id: 'TASK-1042',
+    user_id: 'usr-002',
+    user_name: '赵明',
+    stage: 'develop',
+    content: '后端接口与提醒规则已进入联调。',
+    next_plan: '完成端到端测试并进入内测。',
+    file_ids: [],
+    created_at: '2026-06-10T10:00:00+08:00',
+  },
+]
+
+function loadProgressHistory(): MockTaskProgress[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PROGRESS)
+    return raw ? JSON.parse(raw) as MockTaskProgress[] : [...defaultProgressHistory]
+  } catch {
+    return [...defaultProgressHistory]
+  }
+}
+
+const taskProgressHistory = loadProgressHistory()
+
+function persistProgressHistory() {
+  localStorage.setItem(STORAGE_KEY_PROGRESS, JSON.stringify(taskProgressHistory))
+}
+
+const STAGE_DEMAND_PROGRESS: Record<string, number> = {
+  team: 25,
+  develop: 50,
+  beta: 75,
+  opensource: 100,
+}
 
 function loadPersistedApps() {
   try {
@@ -173,14 +223,54 @@ export const taskHandlers = [
     if (!['in_progress', 'pending_acceptance'].includes(task.status)) {
       return errorResponse('INVALID_TASK_STATUS', '当前状态不允许提交进度', 400)
     }
+    if (!('expected_updated_at' in body)) {
+      return errorResponse('VALIDATION_ERROR', 'expected_updated_at 为必填字段', 422)
+    }
+    if ((body.expected_updated_at ?? null) !== (task.updated_at ?? null)) {
+      return errorResponse('PROGRESS_CONFLICT', '进度已被其他人更新', 409)
+    }
+    if (body.base_stage && body.base_stage !== task.stage) {
+      return errorResponse('PROGRESS_CONFLICT', '进度已被其他人更新', 409)
+    }
     const stage = body.stage as string
     if (!['team', 'develop', 'beta', 'opensource'].includes(stage)) {
       return errorResponse('VALIDATION_ERROR', '阶段必须是 team/develop/beta/opensource 之一', 422)
     }
+    const now = new Date().toISOString()
+    const entry: MockTaskProgress = {
+      id: `progress-${Date.now()}`,
+      task_id: task.id,
+      user_id: currentUserId,
+      user_name: users.find((user) => user.id === currentUserId)?.nickname || currentUserId,
+      stage,
+      content: typeof body.content === 'string' ? body.content : null,
+      next_plan: typeof body.next_plan === 'string' ? body.next_plan : null,
+      file_ids: Array.isArray(body.file_ids) ? body.file_ids as string[] : [],
+      created_at: now,
+    }
+    taskProgressHistory.unshift(entry)
     task.stage = stage
-    task.updated_at = new Date().toISOString()
+    task.updated_at = now
+    demands
+      .filter((demand) => demand.linked_task_id === task.id && demand.is_deleted === 0)
+      .forEach((demand) => {
+        demand.progress = STAGE_DEMAND_PROGRESS[stage] ?? demand.progress
+        demand.updated_at = now
+      })
     saveTasks()
-    return successResponse({})
+    persistProgressHistory()
+    return successResponse(entry as unknown as Record<string, unknown>)
+  }),
+
+  http.get('/api/v1/tasks/:task_id/progress', ({ params, request }) => {
+    const task = tasks.find((t) => t.id === params.task_id)
+    if (!task) return errorResponse('NOT_FOUND', '任务不存在', 404)
+    const url = new URL(request.url)
+    const { page, pageSize } = parsePageParams(url)
+    const items = taskProgressHistory
+      .filter((entry) => entry.task_id === params.task_id)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return paginatedResponse(paginate(items, page, pageSize), page, pageSize, items.length)
   }),
 
   http.post('/api/v1/tasks/:task_id/resources', async ({ params, request }) => {

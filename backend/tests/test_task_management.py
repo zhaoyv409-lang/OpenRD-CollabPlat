@@ -133,7 +133,12 @@ async def test_task_management_uses_real_title_status_and_progress_contracts(
 
         progress = await client.post(
             "/api/v1/tasks/B12-MANAGE/progress",
-            json={"stage": "develop", "content": "B12 管理端真实更新验收"},
+            json={
+                "stage": "develop",
+                "content": "B12 管理端真实更新验收",
+                "base_stage": "team",
+                "expected_updated_at": started.json()["data"]["updated_at"],
+            },
         )
         assert progress.status_code == 200, progress.text
         assert progress.json()["data"]["stage"] == "develop"

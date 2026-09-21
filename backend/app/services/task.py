@@ -1,12 +1,14 @@
 import json
 import uuid
+from datetime import UTC, datetime
 
-from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.demand import Demand
 from app.models.task import Task, TaskProgress, TaskStage
 from app.models.team import TaskMember
+from app.models.user import User
 from app.services.file import bind_files
 
 
@@ -18,6 +20,29 @@ VALID_STATUS_TRANSITIONS = {
     "completed": [],
     "closed": [],
 }
+
+STAGE_DEMAND_PROGRESS = {
+    TaskStage.TEAM: 25,
+    TaskStage.DEVELOP: 50,
+    TaskStage.BETA: 75,
+    TaskStage.OPEN_SOURCE: 100,
+}
+
+
+class ProgressConflictError(Exception):
+    pass
+
+
+class ProgressStatusError(Exception):
+    pass
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def generate_task_id(db: AsyncSession) -> str:
@@ -156,7 +181,24 @@ async def submit_progress(
     file_ids: list[str] | None = None,
     next_plan: str | None = None,
     base_stage: TaskStage | None = None,
+    expected_updated_at: datetime | None,
 ) -> TaskProgress:
+    task = (
+        await db.execute(
+            select(Task)
+            .where(Task.id == task_id, Task.is_deleted == 0)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise LookupError("任务不存在")
+    if task.status not in ("in_progress", "pending_acceptance"):
+        raise ProgressStatusError("当前状态不允许提交进度")
+    if _as_utc(task.updated_at) != _as_utc(expected_updated_at):
+        raise ProgressConflictError("进度已被其他人更新")
+    if base_stage is not None and task.stage != base_stage:
+        raise ProgressConflictError("进度已被其他人更新")
+
     progress_id = uuid.uuid4().hex
     entry = TaskProgress(
         id=progress_id,
@@ -177,23 +219,47 @@ async def submit_progress(
         actor_role=actor_role,
     )
 
-    # 行锁 + 乐观锁：在同一事务内锁定任务行，若客户端提交时看到的阶段
-    # 已与库内不一致（被他人抢先更新），则拒绝本次写入，防止旧请求覆盖新进度。
-    task = (await db.execute(
-        select(Task).where(Task.id == task_id).with_for_update()
-    )).scalar_one_or_none()
-    if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    if base_stage is not None and task.stage != base_stage:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="进度已被其他成员更新，请刷新页面后重新提交",
-        )
     task.stage = stage
+    await db.execute(
+        update(Demand)
+        .where(Demand.linked_task_id == task_id, Demand.is_deleted == 0)
+        .values(progress=STAGE_DEMAND_PROGRESS[stage])
+    )
 
     await db.commit()
     await db.refresh(entry)
     return entry
+
+
+async def list_task_progress(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[tuple[TaskProgress, str | None]], int]:
+    base = select(TaskProgress).where(
+        TaskProgress.task_id == task_id,
+        TaskProgress.is_deleted == 0,
+    )
+    total = (
+        await db.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    display_name = func.coalesce(User.nickname, User.username)
+    rows = (
+        await db.execute(
+            select(TaskProgress, display_name)
+            .outerjoin(User, User.id == TaskProgress.user_id)
+            .where(
+                TaskProgress.task_id == task_id,
+                TaskProgress.is_deleted == 0,
+            )
+            .order_by(TaskProgress.created_at.desc(), TaskProgress.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+    return [(entry, user_name) for entry, user_name in rows], total
 
 
 async def update_resources(

@@ -26,6 +26,7 @@ class ProgressRequest(BaseModel):
     file_ids: list[str] | None = None
     next_plan: str | None = None
     base_stage: TaskStage | None = None
+    expected_updated_at: datetime | None
 
 
 class ResourcesRequest(BaseModel):
@@ -111,6 +112,7 @@ class TaskProgressOut(BaseModel):
     id: str
     task_id: str
     user_id: str
+    user_name: str | None = None
     content: str | None = None
     file_ids: list[str] | None = None
     stage: str | None = None

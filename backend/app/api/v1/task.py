@@ -17,9 +17,12 @@ from app.schemas.task import (
     TaskUpdateRequest,
 )
 from app.services.task import (
+    ProgressConflictError,
+    ProgressStatusError,
     change_status,
     get_task_by_id,
     list_my_tasks,
+    list_task_progress,
     list_tasks,
     submit_progress,
     update_resources,
@@ -184,18 +187,71 @@ async def post_progress(
             detail="仅任务队长、负责人、运营或超级管理员可提交进度",
         )
     
-    entry = await submit_progress(
+    try:
+        entry = await submit_progress(
+            db,
+            task_id=task_id,
+            user_id=current_user["user_id"],
+            stage=body.stage,
+            content=body.content,
+            file_ids=body.file_ids,
+            next_plan=body.next_plan,
+            base_stage=body.base_stage,
+            expected_updated_at=body.expected_updated_at,
+            actor_role=current_user["role"],
+        )
+    except ProgressConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ProgressStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ApiResponse(data=TaskProgressOut.model_validate(entry))
+
+
+@router.get(
+    "/tasks/{task_id}/progress",
+    response_model=ApiResponse[PaginatedData[TaskProgressOut]],
+)
+async def get_progress_history(
+    task_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    current_user: dict = Depends(require_permissions("task:view")),
+    db: AsyncSession = Depends(get_db),
+):
+    task = await get_task_by_id(db, task_id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    rows, total = await list_task_progress(
         db,
         task_id=task_id,
-        user_id=current_user["user_id"],
-        stage=body.stage,
-        content=body.content,
-        file_ids=body.file_ids,
-        next_plan=body.next_plan,
-        base_stage=body.base_stage,
-        actor_role=current_user["role"],
+        page=page,
+        page_size=page_size,
     )
-    return ApiResponse(data=TaskProgressOut.model_validate(entry))
+    can_read_files = (
+        current_user["role"] in ("operator", "super_admin")
+        or current_user["user_id"] in (task.owner_id, task.leader_id)
+    )
+    return ApiResponse(
+        data=PaginatedData(
+            items=[
+                TaskProgressOut(
+                    **TaskProgressOut.model_validate(entry).model_dump(
+                        exclude={"user_name", "file_ids"}
+                    ),
+                    user_name=user_name,
+                    file_ids=(
+                        TaskProgressOut.model_validate(entry).file_ids
+                        if can_read_files
+                        else None
+                    ),
+                )
+                for entry, user_name in rows
+            ],
+            page=page,
+            page_size=page_size,
+            total=total,
+        )
+    )
 
 
 @router.post("/tasks/{task_id}/resources", response_model=ApiResponse[TaskDetail])

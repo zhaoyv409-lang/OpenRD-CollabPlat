@@ -96,11 +96,18 @@ async def task_scene(db_session: AsyncSession) -> dict:
                               status="active", is_deleted=1))
     await db_session.commit()
 
-    return {"task_id": task_id}
+    await db_session.refresh(task)
+    return {"task_id": task_id, "updated_at": task.updated_at}
 
 
-def _progress_payload():
-    return {"stage": "develop", "content": "进度更新", "file_ids": None}
+def _progress_payload(updated_at=None):
+    return {
+        "stage": "develop",
+        "content": "进度更新",
+        "file_ids": None,
+        "base_stage": "team",
+        "expected_updated_at": updated_at.isoformat() if updated_at else None,
+    }
 
 
 def _status_payload():
@@ -131,7 +138,10 @@ async def test_submit_progress_permission(client, task_scene, user_id, role, exp
     """提交更新：仅 owner/leader/operator/super_admin 放行，其余 403"""
     _override(user_id, role)
     try:
-        resp = await client.post(progress_url(task_scene["task_id"]), json=_progress_payload())
+        resp = await client.post(
+            progress_url(task_scene["task_id"]),
+            json=_progress_payload(task_scene["updated_at"]),
+        )
     finally:
         _clear_override()
     assert resp.status_code == expected, (
@@ -169,7 +179,10 @@ async def test_submit_progress_creates_entry_for_owner(client, task_scene, db_se
     """负责人提交后，TaskProgress 记录确实被创建"""
     _override("owner-001", "builder")
     try:
-        resp = await client.post(progress_url(task_scene["task_id"]), json=_progress_payload())
+        resp = await client.post(
+            progress_url(task_scene["task_id"]),
+            json=_progress_payload(task_scene["updated_at"]),
+        )
     finally:
         _clear_override()
     assert resp.status_code == 200
@@ -206,7 +219,10 @@ async def test_submit_progress_no_side_effect_for_unauthorized(client, task_scen
 
     _override("member-001", "builder")
     try:
-        resp = await client.post(progress_url(task_scene["task_id"]), json=_progress_payload())
+        resp = await client.post(
+            progress_url(task_scene["task_id"]),
+            json=_progress_payload(task_scene["updated_at"]),
+        )
     finally:
         _clear_override()
     assert resp.status_code == 403
