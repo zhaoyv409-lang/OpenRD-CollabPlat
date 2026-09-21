@@ -160,6 +160,33 @@ async def get_effective_permissions(db: AsyncSession, user_id: str, role: str) -
     return role_permissions | manual_permissions
 
 
+async def has_permission(
+    db: AsyncSession, user_id: str, role: str, *permissions: str
+) -> bool:
+    """最终权限（角色模板 ∪ 手动授权）中是否包含任一指定权限。
+
+    用于「资源归属 OR 系统权限」型路由：例如任务队长可审批，
+    或拥有 member:approve 的用户也可审批。
+    """
+    effective = await get_effective_permissions(db, user_id, role)
+    return any(permission in effective for permission in permissions)
+
+
+async def has_manual_permission(
+    db: AsyncSession, user_id: str, *permissions: str
+) -> bool:
+    """是否被平台显式手动授予任一指定权限（只算手动授权，不含角色模板）。
+
+    语义区分：
+    - 角色模板里的权限是「依附于资源归属的能力」，例如 builder 的 task:update
+      只代表「可更新自己参与的任务」，必须继续叠加归属校验；
+    - 手动授权是「平台级能力」，管理员显式授予后即可越过归属限制，
+      这正是「用户手动权限全栈打通」要保证的行为。
+    """
+    manual = await get_manual_permissions(db, user_id)
+    return any(permission in manual for permission in permissions)
+
+
 async def get_user_permission_detail(db: AsyncSession, user: User) -> dict:
     """查询某用户的模板权限、手动权限与最终权限。"""
     template = get_permissions_for_role(user.role)

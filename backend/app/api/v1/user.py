@@ -251,5 +251,14 @@ async def admin_unlock_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
     if not user.is_locked:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户未处于锁定状态")
+
+    # 解锁守卫：与锁定接口对称，超管只能被超管解锁，
+    # 否则仅被手动授予 admin:user 的普通用户也能重新启用超管账号。
+    if user.role == "super_admin" and current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员可以解锁超级管理员",
+        )
+
     await unlock_user(db, user)
     return ApiResponse(message="用户已解锁")

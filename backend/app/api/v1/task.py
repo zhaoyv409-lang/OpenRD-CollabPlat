@@ -16,6 +16,7 @@ from app.schemas.task import (
     TaskProgressOut,
     TaskUpdateRequest,
 )
+from app.services.admin import has_manual_permission, has_permission
 from app.services.task import (
     ProgressConflictError,
     ProgressStatusError,
@@ -143,16 +144,16 @@ async def post_change_status(
     task = await get_task_by_id(db, task_id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    # 权限：仅运营/超级管理员、任务负责人(owner)、队长(leader) 可推进阶段；
-    # 普通共建者（非队长）无权操作。
-    user_role = current_user["role"]
+    # 权限：仅任务负责人(owner)、队长(leader)、拥有 task:status 最终权限者（运营/超管），
+    # 或后台手动授予 task:status 的用户；普通共建者（非队长）无权操作。
     user_id = current_user["user_id"]
-    is_authorized = user_role in ("operator", "super_admin")
+    user_role = current_user["role"]
     is_owner_or_leader = user_id in (task.leader_id, task.owner_id)
-    if not is_authorized and not is_owner_or_leader:
+    has_perm = await has_permission(db, user_id, user_role, "task:status")
+    if not is_owner_or_leader and not has_perm:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="仅任务队长、负责人、运营或超级管理员可变更任务状态",
+            detail="仅任务队长、负责人或拥有调整状态权限的用户可变更任务状态",
         )
     result = await change_status(db, task, new_status=body.status, reason=body.reason)
     if result is None:
@@ -176,15 +177,19 @@ async def post_progress(
     if task.status not in ("in_progress", "pending_acceptance"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前状态不允许提交进度")
     
-    # ===== 数据归属校验：仅运营/超级管理员、任务负责人(owner)、队长(leader) 可提交进度 =====
+    # ===== 数据归属校验：仅任务负责人(owner)、队长(leader)、拥有 task:manage 的运营/超管，
+    # 或后台手动授权 task:update 的用户可提交进度 =====
+    # 注意：builder 角色模板自带 task:update，但那只代表「可更新自己参与的任务」，
+    # 必须继续叠加归属校验；只有管理员手动授予的 task:update 才视为平台级更新权限。
     user_id = current_user["user_id"]
     user_role = current_user["role"]
-    is_authorized = user_role in ("operator", "super_admin")
     is_owner_or_leader = user_id in (task.leader_id, task.owner_id)
-    if not is_authorized and not is_owner_or_leader:
+    has_manage = await has_permission(db, user_id, user_role, "task:manage")
+    has_granted_update = await has_manual_permission(db, user_id, "task:update")
+    if not is_owner_or_leader and not has_manage and not has_granted_update:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="仅任务队长、负责人、运营或超级管理员可提交进度",
+            detail="仅任务队长、负责人或拥有更新任务权限的用户可提交进度",
         )
     
     try:

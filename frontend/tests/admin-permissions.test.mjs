@@ -91,4 +91,14 @@ test('mocks enforce the same anti-escalation guards as the backend', () => {
   assert.match(mockSource, /只有超级管理员可以变更角色/)
   assert.match(mockSource, /超出自身权限范围/)
   assert.match(mockSource, /不能降级最后一个超级管理员/)
+  assert.match(mockSource, /只有超级管理员可以解锁超级管理员/)
+})
+
+test('mock logs role changes using the role captured before mutation', () => {
+  // 先保存旧角色，再做变更判断：否则 role !== user.role 恒为 false
+  const captureIndex = mockSource.indexOf('const previousRole = user.role')
+  const mutateIndex = mockSource.indexOf('user.role = role')
+  assert.ok(captureIndex >= 0, '必须先保存 previousRole')
+  assert.ok(mutateIndex > captureIndex, 'previousRole 必须在 user.role 赋值之前捕获')
+  assert.match(mockSource, /action:\s*role !== previousRole \?/)
 })

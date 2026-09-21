@@ -237,6 +237,13 @@ export const adminHandlers = [
 
   http.post('/api/v1/admin/users/:user_id/unlock', ({ params }) => {
     const user = users.find((u) => u.id === params.user_id)
+    const currentUser = getCurrentUser()
+
+    // 解锁守卫：与锁定接口对称，超管只能被超管解锁
+    if (user && user.role === 'super_admin' && currentUser.role !== 'super_admin') {
+      return errorResponse('FORBIDDEN', '只有超级管理员可以解锁超级管理员', 403)
+    }
+
     if (user) { user.status = 'active'; persistUserProfile(user) }
     addSystemLog({
       module: '用户管理', action: '解封用户',
@@ -357,7 +364,10 @@ export const adminHandlers = [
     manualPermissionsStore[userId] = next
     saveManualPermissions(manualPermissionsStore)
 
-    if (role !== user.role) {
+    // 必须在修改 user.role 之前取旧角色，否则 role !== user.role 恒为 false，
+    // 角色变更会被错误记录成「修改用户权限」。
+    const previousRole = user.role
+    if (role !== previousRole) {
       user.role = role
       persistUserProfile(user)
     }
@@ -367,7 +377,7 @@ export const adminHandlers = [
 
     addSystemLog({
       module: '权限管理',
-      action: role !== user.role ? '调整用户授权（角色+权限）' : '修改用户权限',
+      action: role !== previousRole ? '调整用户授权（角色+权限）' : '修改用户权限',
       target: `${user.nickname} / ${user.platform_id}`,
       result: 'success',
       risk_level: 'high',
