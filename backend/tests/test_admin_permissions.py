@@ -799,23 +799,145 @@ async def test_lock_guards(client, fake_redis, db_session, monkeypatch):
         headers=_auth(operator["token"]),
     )
     assert lock_super.status_code == 403
+    assert "只有超级管理员可以锁定超级管理员" in lock_super.json()["detail"]
 
-    # 最后一个超管不可锁定（场景构造：count 固定为 1）
-    async def _fake_count(db):
+    # 最后一个超管不可锁定：构造两名超管 A、B，monkeypatch count_super_admins=1，
+    # 让 A 锁定 B 才会触发"最后一个超级管理员"守卫；若 A 直接锁定自己会先撞
+    # "不能锁定自己的账号"，因此必须有第二个超管作为目标。
+    another_super = await _register_user(
+        client, fake_redis, username="auth_sa_22", phone="13900002204"
+    )
+    await _set_role(db_session, another_super["id"], "super_admin")
+
+    async def _fake_count(_db):
+        # 两个超管 A、B，仅暴露 1 个，模拟「系统剩最后一个」并发态
         return 1
 
     monkeypatch.setattr("app.api.v1.user.count_super_admins", _fake_count)
     lock_last = await client.post(
-        f"{ADMIN_USERS_PATH}/{admin['id']}/lock",
+        f"{ADMIN_USERS_PATH}/{another_super['id']}/lock",
         headers=_auth(admin["token"]),
     )
     assert lock_last.status_code == 400
     assert "最后一个超级管理员" in lock_last.json()["detail"]
 
-    # 超管锁定普通用户 → 正常
+    # 解除 monkeypatch：A 锁普通用户 → 正常 200
+    monkeypatch.undo()
+
     target = await _register_user(client, fake_redis, username="auth_target_22", phone="13900002203")
     ok = await client.post(
         f"{ADMIN_USERS_PATH}/{target['id']}/lock",
         headers=_auth(admin["token"]),
     )
     assert ok.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 23. 锁定用户后旧 Token 立即失效（鉴权以数据库当前锁定态为准）
+# ---------------------------------------------------------------------------
+
+
+async def test_locked_user_old_token_is_rejected(client, fake_redis, db_session):
+    admin = await _make_super_admin(
+        client, fake_redis, db_session, username="auth_admin_23", phone="13900002301"
+    )
+
+    # 注册时即拿到 access token（JWT 角色 = requester）
+    target = await _register_user(client, fake_redis, username="auth_target_23", phone="13900002302")
+
+    # 锁定前：旧 Token 可访问 /me
+    before = await client.get(f"{API}/me", headers=_auth(target["token"]))
+    assert before.status_code == 200, before.text
+
+    # 管理员锁定目标用户（JWT 中目标仍为 requester，数据库 is_locked 已被更新）
+    lock_resp = await client.post(
+        f"{ADMIN_USERS_PATH}/{target['id']}/lock",
+        headers=_auth(admin["token"]),
+    )
+    assert lock_resp.status_code == 200, lock_resp.text
+
+    # 同一个旧 Token：受保护接口立即 401（无需等到 JWT 自然过期）
+    after = await client.get(f"{API}/me", headers=_auth(target["token"]))
+    assert after.status_code == 401, after.text
+    assert "锁定" in after.json()["detail"]
+
+    # 校验其他受保护接口也立即拒绝
+    me_perms = await client.get(f"{API}/me/permissions", headers=_auth(target["token"]))
+    assert me_perms.status_code == 401
+    assert "锁定" in me_perms.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 24. 两个超管并发互降：advisory lock 串行化「判断+变更」
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_super_admin_demote_serialized(client, fake_redis, db_session):
+    """两个超管同时互相降级，必须有至少一方被「最后一个超管」守卫拦截。"""
+    import asyncio
+
+    from app.services.admin import count_super_admins
+
+    admin_a = await _make_super_admin(
+        client, fake_redis, db_session, username="auth_admin_24a", phone="13900002401"
+    )
+    admin_b = await _make_super_admin(
+        client, fake_redis, db_session, username="auth_admin_24b", phone="13900002402"
+    )
+
+    async def _demote(actor_token, target_id):
+        return await client.put(
+            authorization_url(target_id),
+            json={"role": "requester", "manual_permission_ids": [], "reason": "并发降级测试"},
+            headers=_auth(actor_token),
+        )
+
+    r1, r2 = await asyncio.gather(
+        _demote(admin_a["token"], admin_b["id"]),
+        _demote(admin_b["token"], admin_a["id"]),
+    )
+
+    codes = sorted([r1.status_code, r2.status_code])
+    # 至少一方成功（200）、至少一方被拦截（400）
+    assert 200 in codes and 400 in codes, f"期望 200/400 各一，实际 {codes}"
+
+    n = await count_super_admins(db_session)
+    assert n >= 1, f"至少应剩 1 个超管，实际 {n}"
+
+
+async def test_concurrent_super_admin_lock_serialized(client, fake_redis, db_session):
+    """两个超管同时互相锁定：至少有 1 个超管保持解锁。"""
+    import asyncio
+
+    admin_a = await _make_super_admin(
+        client, fake_redis, db_session, username="auth_admin_25a", phone="13900002501"
+    )
+    admin_b = await _make_super_admin(
+        client, fake_redis, db_session, username="auth_admin_25b", phone="13900002502"
+    )
+
+    async def _lock(actor_token, target_id):
+        return await client.post(
+            f"{ADMIN_USERS_PATH}/{target_id}/lock",
+            headers=_auth(actor_token),
+        )
+
+    r1, r2 = await asyncio.gather(
+        _lock(admin_a["token"], admin_b["id"]),
+        _lock(admin_b["token"], admin_a["id"]),
+    )
+
+    codes = sorted([r1.status_code, r2.status_code])
+    assert 200 in codes and 400 in codes, f"期望 200/400 各一，实际 {codes}"
+
+    # 至少还有 1 个超管 未被锁
+    not_locked = (
+        await db_session.execute(
+            select(User).where(
+                User.id.in_([admin_a["id"], admin_b["id"]]),
+                User.role == "super_admin",
+                User.is_locked == 0,
+            )
+        )
+    ).scalars().all()
+    assert len(not_locked) >= 1, "至少应剩 1 个未锁定的超管"

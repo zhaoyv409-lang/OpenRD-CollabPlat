@@ -13,7 +13,11 @@ from app.schemas.user import (
     ProfileUpdateRequest,
     UserDetail,
 )
-from app.services.admin import count_super_admins, get_effective_permissions
+from app.services.admin import (
+    count_super_admins,
+    get_effective_permissions,
+    serialize_super_admin_changes,
+)
 from app.services.user import (
     admin_update_user,
     change_password,
@@ -187,11 +191,14 @@ async def admin_patch_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="不能修改自己的角色",
             )
-        if user.role == "super_admin" and await count_super_admins(db) <= 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="不能降级最后一个超级管理员",
-            )
+        if user.role == "super_admin":
+            # 用 advisory lock 串行化「判断+变更」流程，避免两个超管并发互降
+            await serialize_super_admin_changes(db)
+            if await count_super_admins(db) <= 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="不能降级最后一个超级管理员",
+                )
 
     user = await admin_update_user(db, user, **updates)
     return ApiResponse(data=_user_to_detail(user))
@@ -221,6 +228,8 @@ async def admin_lock_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="只有超级管理员可以锁定超级管理员",
             )
+        # 用 advisory lock 串行化「判断+变更」流程，避免两个超管并发互锁
+        await serialize_super_admin_changes(db)
         if await count_super_admins(db) <= 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

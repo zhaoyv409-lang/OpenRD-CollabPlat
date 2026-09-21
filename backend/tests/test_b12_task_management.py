@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
 from app.main import app
-from app.models.task import Task
+from app.models.task import Task, TaskStage
 from app.models.team import TaskMember
 
 
@@ -15,7 +15,7 @@ def _task(task_id: str, title: str, status: str, **owners: str) -> Task:
         description=None,
         status=status,
         team_status="forming",
-        progress=0,
+        stage=TaskStage.TEAM,
         **owners,
     )
 
@@ -134,15 +134,15 @@ async def test_task_management_uses_real_title_status_and_progress_contracts(
 
         progress = await client.post(
             "/api/v1/tasks/B12-MANAGE/progress",
-            json={"progress": 45, "content": "B12 管理端真实更新验收"},
+            json={"stage": "develop", "content": "B12 管理端真实更新验收"},
         )
         assert progress.status_code == 200, progress.text
-        assert progress.json()["data"]["progress"] == 45
+        assert progress.json()["data"]["stage"] == "develop"
         assert progress.json()["data"]["content"] == "B12 管理端真实更新验收"
 
         detail = await client.get("/api/v1/tasks/B12-MANAGE")
         assert detail.status_code == 200, detail.text
         assert detail.json()["data"]["status"] == "in_progress"
-        assert detail.json()["data"]["progress"] == 45
+        assert detail.json()["data"]["stage"] == "develop"
     finally:
         app.dependency_overrides.pop(get_current_user, None)

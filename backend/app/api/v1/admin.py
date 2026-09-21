@@ -18,6 +18,7 @@ from app.services.admin import (
     get_system_log_by_id,
     get_user_permission_detail,
     list_system_logs,
+    serialize_super_admin_changes,
     set_user_authorization,
 )
 from app.services.user import get_user_by_id
@@ -130,6 +131,8 @@ async def put_user_authorization(
 
     # 守卫 5：不能降级最后一个超级管理员
     if user.role == "super_admin" and body.role != "super_admin":
+        # 用 advisory lock 串行化「判断+变更」流程，避免两个超管并发互降
+        await serialize_super_admin_changes(db)
         if await count_super_admins(db) <= 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

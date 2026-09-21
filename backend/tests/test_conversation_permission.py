@@ -148,9 +148,11 @@ async def scenario(db_session: AsyncSession) -> dict:
     # 造消息（thread_id 传字符串，匹配前端真实行为）
     await create_reply(db_session, demand_id=demand_id, thread_id=THREAD_ID,
                        sender_id="member-001", sender_role=NORMAL_ROLE,
+                       actor_role=NORMAL_ROLE,
                        content="成员发的消息", attachment_ids=None)
     await create_reply(db_session, demand_id=demand_id, thread_id=THREAD_ID,
                        sender_id="creator-001", sender_role=NORMAL_ROLE,
+                       actor_role=NORMAL_ROLE,
                        content="创建者发的消息", attachment_ids=None)
     await db_session.commit()
 

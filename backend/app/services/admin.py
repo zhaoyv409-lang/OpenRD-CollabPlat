@@ -1,12 +1,18 @@
 import json
 import uuid
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import get_permissions_for_role
 from app.models.admin import SystemLog, UserPermission
 from app.models.user import User
+
+
+# 用于 pg_advisory_xact_lock 串行化所有「最后一个超级管理员」判断路径。
+# 两个请求并发执行各自的事务时，只有先拿到 advisory lock 的事务能继续；
+# 后者会阻塞到先者 commit/rollback，再执行自己的 count，避免读写竞态。
+_SUPER_ADMIN_GUARD_KEY = 931024613  # 固定整数，跨进程保持一致
 
 
 def _build_system_log(
@@ -223,11 +229,28 @@ def _build_role_change_log(
 
 
 async def count_super_admins(db: AsyncSession) -> int:
-    """统计未删除的超级管理员数量（用于「最后一个超管」保护）。"""
+    """统计未删除、未锁定的超级管理员数量（用于「最后一个超管」保护）。
+
+    被锁定的超管无法通过鉴权（get_current_user 直接 401），等同失效，
+    不计入有效超管数；否则并发互锁场景下系统可能实际上没有可用超管。
+    """
     stmt = select(func.count()).select_from(User).where(
-        User.role == "super_admin", User.is_deleted == 0
+        User.role == "super_admin", User.is_deleted == 0, User.is_locked == 0
     )
     return (await db.execute(stmt)).scalar_one()
+
+
+async def serialize_super_admin_changes(db: AsyncSession) -> None:
+    """对所有「判断+变更超管状态」的操作加 pg_advisory_xact_lock。
+
+    防止两个超管并发互降/互锁导致系统失去所有超管。
+    锁随事务结束（commit/rollback）自动释放，调用方必须确保后续
+    在同一事务内完成 count 检查 + 状态修改。
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": _SUPER_ADMIN_GUARD_KEY},
+    )
 
 
 async def _apply_manual_permissions(

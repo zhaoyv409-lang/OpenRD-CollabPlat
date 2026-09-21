@@ -28,10 +28,13 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token 已吊销")
 
     # 以数据库中的当前角色为准，不信任 JWT 中的旧角色：
-    # 角色被降级/变更后立即生效，无需等待用户重新登录
+    # 角色被降级/变更后立即生效，无需等待用户重新登录。
+    # 账号锁定后旧 Token 也立即失效，无需等到自然过期。
     user = await get_user_by_id(db, payload["sub"])
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已被删除")
+    if user.is_locked:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号已被锁定")
 
     return {"user_id": user.id, "role": user.role, "jti": jti}
 
