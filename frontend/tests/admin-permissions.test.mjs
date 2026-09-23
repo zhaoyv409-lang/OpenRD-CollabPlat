@@ -5,6 +5,13 @@ import test from 'node:test'
 const viewSource = readFileSync(new URL('../src/views/PermissionManagementView.vue', import.meta.url), 'utf8')
 const apiSource = readFileSync(new URL('../src/api/admin.ts', import.meta.url), 'utf8')
 const mockSource = readFileSync(new URL('../src/mocks/handlers/admin.ts', import.meta.url), 'utf8')
+const userMockSource = readFileSync(new URL('../src/mocks/handlers/user.ts', import.meta.url), 'utf8')
+
+// 抓取形如 `builder: ['a', 'b']` 的角色权限数组字面量
+function roleTemplate(source, role) {
+  const match = source.match(new RegExp(`${role}:\\s*\\[[^\\]]*\\]`))
+  return match ? match[0] : ''
+}
 
 test('saving authorization uses the single atomic setUserAuthorization call', () => {
   // 必须调用原子授权接口（角色 + 手动权限 + 原因一次提交）
@@ -101,4 +108,50 @@ test('mock logs role changes using the role captured before mutation', () => {
   assert.ok(captureIndex >= 0, '必须先保存 previousRole')
   assert.ok(mutateIndex > captureIndex, 'previousRole 必须在 user.role 赋值之前捕获')
   assert.match(mockSource, /action:\s*role !== previousRole \?/)
+})
+
+test('the builder role template no longer inherits task:update', () => {
+  // builder 模板不含 task:update：普通任务成员不能提交进度，模板里暴露它只会
+  // 让 /me/permissions 出现一个调用即 403 的权限
+  const adminBuilder = roleTemplate(mockSource, 'builder')
+  assert.ok(adminBuilder, '未在权限管理 mock 中找到 builder 模板')
+  assert.doesNotMatch(adminBuilder, /task:update/)
+
+  // 变更范围最小化：operator 的平台级能力不受影响
+  assert.match(roleTemplate(mockSource, 'operator'), /task:manage/)
+
+  // /me/permissions 的 mock 权限表必须同步
+  const userBuilder = roleTemplate(userMockSource, 'builder')
+  assert.ok(userBuilder, '未在 user mock 中找到 builder 权限表')
+  assert.doesNotMatch(userBuilder, /task:update/)
+})
+
+test('task:update stays in the permission catalogue so it can still be granted', () => {
+  // 模板里移除不等于权限下线：它必须仍在权限全集里，否则授权接口会判为非法权限 ID
+  const catalogue = mockSource.match(/const ALL_PERMISSIONS = \[[\s\S]*?\]/)?.[0] ?? ''
+  assert.ok(catalogue, '未找到 ALL_PERMISSIONS')
+  assert.match(catalogue, /'task:update'/)
+})
+
+test('the task:update checkbox is operable and saved as a manual permission', () => {
+  // 复选框只因「模板继承」被锁定；builder 模板已不含 task:update ⇒ 可勾选
+  assert.match(viewSource, /:disabled="selectedTemplateIds\.includes\(permission\.id\)"/)
+  assert.match(viewSource, /:checked="isManualChecked\(permission\.id\)"/)
+  // 取消锁定后仍会写入 editForm.manualPermissions（toggle 内部对模板项直接 return）
+  assert.match(viewSource, /function toggleManualPermission\(permissionId: string, checked: boolean\)/)
+  assert.match(viewSource, /if \(templateSet\.has\(permissionId\)\) return/)
+  assert.match(viewSource, /editForm\.value\.manualPermissions = \[\.\.\.next\]/)
+  // 保存时按「非模板项」提交，task:update 会出现在 manual_permission_ids 中
+  assert.match(viewSource, /filter\(\(id\) => !templateSet\.has\(id\)\)/)
+  assert.match(viewSource, /manual_permission_ids:\s*manualPermissionIds,/)
+})
+
+test('reopening the dialog restores the manual task:update grant from the server', () => {
+  // 打开弹窗时以服务端 manual_permission_ids 为事实来源
+  assert.match(viewSource, /editForm\.value\.manualPermissions = \[\.\.\.\(res\.data\.manual_permission_ids \?\? \[\]\)\]/)
+  assert.match(viewSource, /applyPermissionDetail\(user, res\.data\)/)
+  // mock 侧同样持久化手动授权，保证重新打开后读到的仍是已授权状态（而非模板继承）
+  assert.match(mockSource, /manualPermissionsStore\[userId\] = next/)
+  assert.match(mockSource, /saveManualPermissions\(manualPermissionsStore\)/)
+  assert.match(mockSource, /manual_permission_ids: manual,/)
 })

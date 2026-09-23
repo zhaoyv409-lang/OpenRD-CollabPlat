@@ -178,9 +178,10 @@ async def post_progress(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前状态不允许提交进度")
     
     # ===== 数据归属校验：仅任务负责人(owner)、队长(leader)、拥有 task:manage 的运营/超管，
-    # 或后台手动授权 task:update 的用户可提交进度 =====
-    # 注意：builder 角色模板自带 task:update，但那只代表「可更新自己参与的任务」，
-    # 必须继续叠加归属校验；只有管理员手动授予的 task:update 才视为平台级更新权限。
+    # 或管理员手动授予 task:update 的用户可提交进度 =====
+    # 注意：task:update 不再属于 builder 角色模板，它只作为管理员手动授予的平台级权限，
+    # 含义是「可更新不属于自己的任务进度」。因此这里只查手动授权（has_manual_permission），
+    # 不查角色模板，避免普通任务成员因模板权限而越过归属校验。
     user_id = current_user["user_id"]
     user_role = current_user["role"]
     is_owner_or_leader = user_id in (task.leader_id, task.owner_id)

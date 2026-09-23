@@ -21,9 +21,10 @@ const ALL_PERMISSIONS = [
 ]
 
 // 各角色的模板权限（与后端 ROLE_PERMISSIONS 对齐）
+// builder 刻意不含 task:update：普通任务成员不能提交进度，该权限只由管理员手动授予。
 const ROLE_TEMPLATE_PERMISSIONS: Record<string, string[]> = {
   requester: ['demand:create', 'demand:view', 'task:view', 'message:view', 'file:upload'],
-  builder: ['demand:create', 'demand:view', 'task:view', 'task:join', 'task:update', 'member:view', 'message:view', 'file:upload'],
+  builder: ['demand:create', 'demand:view', 'task:view', 'task:join', 'member:view', 'message:view', 'file:upload'],
   operator: [
     'demand:create', 'demand:view', 'demand:reply', 'demand:convert', 'demand:reject',
     'demand:link', 'demand:archive', 'task:view', 'task:update', 'task:manage', 'task:status',

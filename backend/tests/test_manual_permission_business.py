@@ -328,7 +328,8 @@ async def test_task_update_manual_grant_allows_progress(client, db_session, scen
     await _set_task_status(db_session, task_id, "in_progress")
     stranger = scene["stranger"]
 
-    # 无关 builder：角色模板自带 task:update，但必须叠加归属校验 → 仍 403
+    # 无关 builder：builder 模板已不含 task:update（见 test_task_update_permission.py），
+    # 没有任何手动授权 → 必须叠加归属校验 → 403
     denied = await client.post(
         f"{API}/tasks/{task_id}/progress",
         json={

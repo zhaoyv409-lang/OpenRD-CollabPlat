@@ -178,10 +178,11 @@ async def has_manual_permission(
     """是否被平台显式手动授予任一指定权限（只算手动授权，不含角色模板）。
 
     语义区分：
-    - 角色模板里的权限是「依附于资源归属的能力」，例如 builder 的 task:update
-      只代表「可更新自己参与的任务」，必须继续叠加归属校验；
-    - 手动授权是「平台级能力」，管理员显式授予后即可越过归属限制，
-      这正是「用户手动权限全栈打通」要保证的行为。
+    - 角色模板是「按角色批量下发的默认能力」，不针对具体用户下发；
+    - 手动授权是「平台级能力」，管理员对特定用户显式授予后立即生效，
+      这正是「用户手动权限全栈打通」要保证的行为；
+    - 个别权限（如 task:update）刻意不进入 builder 等低角色模板，只能通过手动授权获得，
+      这类判定必须只查手动授权，不能退化成查最终权限。
     """
     manual = await get_manual_permissions(db, user_id)
     return any(permission in manual for permission in permissions)
